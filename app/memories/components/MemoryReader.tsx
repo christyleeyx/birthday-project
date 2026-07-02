@@ -107,7 +107,7 @@ function getEntryAccent(entry: ScrapbookEntry) {
 }
 
 function getReaderHref(memoryId: string, basePath: MemoryReaderProps["basePath"]) {
-  return basePath === "/memories" ? `/memories?id=${memoryId}` : `/memories/${memoryId}`;
+  return basePath === "/memories" ? `/memories?id=${memoryId}` : `/memories?id=${memoryId}`;
 }
 
 function sortMemoriesByDate(memories: Memory[]) {
@@ -329,7 +329,7 @@ export default function MemoryReader({
       return;
     }
 
-    const url = `${window.location.origin}/memories/${activeMemory.id}`;
+    const url = `${window.location.origin}/memories?id=${activeMemory.id}`;
 
     if (navigator.share) {
       await navigator.share({
@@ -679,7 +679,7 @@ export default function MemoryReader({
               </p>
               {basePath === "/memories" ? (
                 <Link
-                  href={`/memories/${activeMemory.id}`}
+                  href={`/memories?id=${activeMemory.id}`}
                   className="mt-4 inline-flex rounded-full border border-stone-300 bg-white/45 px-4 py-2 text-xs font-medium text-stone-700 transition hover:bg-white"
                 >
                   Open share link
