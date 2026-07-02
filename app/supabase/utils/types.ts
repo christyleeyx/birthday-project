@@ -32,6 +32,7 @@ export interface Memory {
   image_urls: string[] | null;
   image_captions: string[] | null;
   image_timestamps: string[] | null;
+  timeline_order: string[] | null;
   memory_date: string | null;
   created_at: string | null;
   updated_at: string | null;

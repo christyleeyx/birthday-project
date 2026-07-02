@@ -1,9 +1,12 @@
 export interface ScrapbookEntry {
+  author: string;
   label: string;
   text: string;
   badgeClassName: string;
   cardClassName: string;
   timestamp: string;
+  paragraphIndex: number;
+  originalParagraph: string;
 }
 
 const palette = [
@@ -67,6 +70,25 @@ export function buildScrapbookParagraph(author: string, text: string, timestamp:
   return `[${timestamp}] ${trimmedAuthor}: ${trimmedText}`;
 }
 
+export function replaceScrapbookParagraph(
+  content: string | null,
+  paragraphIndex: number,
+  nextParagraph: string,
+) {
+  const paragraphs = (content ?? "")
+    .split(/\n\s*\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (paragraphIndex < 0 || paragraphIndex >= paragraphs.length) {
+    return content ?? "";
+  }
+
+  paragraphs[paragraphIndex] = nextParagraph.trim();
+
+  return paragraphs.join("\n\n");
+}
+
 function getFallbackTimestamp(baseTimestamp: string, index: number) {
   const baseTime = new Date(baseTimestamp).getTime();
   const safeBaseTime = Number.isNaN(baseTime) ? 0 : baseTime;
@@ -102,11 +124,14 @@ export function parseScrapbookEntries(
       const style = getPaletteStyle(author, index);
 
       return {
+        author,
         label: inferLabel(author, index),
         text,
         badgeClassName: style.badge,
         cardClassName: style.card,
         timestamp,
+        paragraphIndex: index,
+        originalParagraph: paragraph,
       };
     });
 }

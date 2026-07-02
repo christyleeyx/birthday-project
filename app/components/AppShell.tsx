@@ -12,13 +12,17 @@ interface AppShellProps {
 }
 
 const navItems = [
-  { href: "/dashboard", label: "Dashboard", icon: "⌂" },
-  { href: "/calendar", label: "Calendar", icon: "□" },
-  { href: "/memories", label: "Memories", icon: "◇" },
+  { href: "/dashboard", label: "Dashboard", icon: "H" },
+  { href: "/calendar", label: "Calendar", icon: "C" },
+  { href: "/memories", label: "Memories", icon: "M" },
+  { href: "/feedback", label: "Feedback", icon: "F" },
   { href: "/memories/new", label: "New memory", icon: "+" },
 ];
 
-export default function AppShell({ children, variant = "default" }: AppShellProps) {
+export default function AppShell({
+  children,
+  variant = "default",
+}: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -44,7 +48,7 @@ export default function AppShell({ children, variant = "default" }: AppShellProp
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#f5ead8] px-6">
+      <main className="sweet-patchwork flex min-h-screen items-center justify-center px-6">
         <p className="text-sm font-medium text-slate-600">
           Checking your session...
         </p>
@@ -61,15 +65,15 @@ export default function AppShell({ children, variant = "default" }: AppShellProp
   }
 
   return (
-    <main className="min-h-screen bg-[#f5ead8] text-slate-900">
+    <main className="sweet-patchwork min-h-screen text-slate-900">
       <div className="mx-auto flex min-h-screen max-w-[96rem] flex-col lg:flex-row">
-        <aside className="border-b border-amber-200/70 bg-[#f8efe0]/90 px-4 py-4 shadow-sm backdrop-blur lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64 lg:flex-col lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
+        <aside className="border-b border-amber-200/70 bg-[#fff4be]/88 px-4 py-4 shadow-sm backdrop-blur lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64 lg:flex-col lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
           <div className="flex items-center justify-between gap-4 lg:block">
             <Link
               href="/dashboard"
               className="font-serif text-3xl italic tracking-wide text-slate-950"
             >
-              Mosaic
+              Pookles
               <span className="ml-1 inline-block rotate-12 text-2xl text-orange-400">
                 *
               </span>

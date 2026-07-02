@@ -7,21 +7,24 @@ import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  Check,
+  GripVertical,
   MapPin,
   MoreVertical,
   Pencil,
   PlusCircle,
   Share2,
+  X,
 } from "lucide-react";
 
 import { supabaseBrowserClient } from "@/app/supabase/client";
 import { Memory } from "@/app/supabase/utils/types";
-import MemoryEditForm from "./MemoryEditForm";
 import { getMemoryDateKey, getMemoryDisplayDate } from "../utils/memoryDates";
 import { getMemoryImageStoragePath } from "../utils/storagePaths";
 import {
   buildScrapbookParagraph,
   parseScrapbookEntries,
+  replaceScrapbookParagraph,
   ScrapbookEntry,
 } from "../utils/scrapbook";
 
@@ -29,6 +32,7 @@ interface MemoryReaderProps {
   memoryId?: string;
   basePath?: "/memories" | "/memories/detail";
   showDateNavigation?: boolean;
+  surface?: "standalone" | "embedded";
 }
 
 interface TimelineImage {
@@ -38,6 +42,7 @@ interface TimelineImage {
 }
 
 interface TimelineItem {
+  key: string;
   type: "entry" | "image";
   data: ScrapbookEntry | TimelineImage;
   timestamp: string;
@@ -119,22 +124,48 @@ function sortMemoriesByDate(memories: Memory[]) {
   });
 }
 
+function getDisplayNameFromSessionUser(user: {
+  email?: string;
+  user_metadata?: Record<string, unknown>;
+}) {
+  const metadata = user.user_metadata ?? {};
+  const metadataName = metadata.full_name || metadata.name;
+
+  return (
+    (typeof metadataName === "string" && metadataName.trim()) ||
+    user.email?.split("@")[0] ||
+    "You"
+  );
+}
+
+function normalizeAuthor(value: string) {
+  return value.trim().toLowerCase();
+}
+
 export default function MemoryReader({
   memoryId,
   basePath = "/memories/detail",
   showDateNavigation = false,
+  surface = "standalone",
 }: MemoryReaderProps) {
   const router = useRouter();
 
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
+  const [isEditingMemory, setIsEditingMemory] = useState(false);
   const [isAddingReflection, setIsAddingReflection] = useState(false);
   const [newParagraph, setNewParagraph] = useState("");
   const [addingParagraph, setAddingParagraph] = useState(false);
   const [addParagraphError, setAddParagraphError] = useState<string | null>(null);
+  const [editingParagraphIndex, setEditingParagraphIndex] = useState<number | null>(null);
+  const [editingParagraphText, setEditingParagraphText] = useState("");
+  const [savingParagraph, setSavingParagraph] = useState(false);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [paragraphEditError, setParagraphEditError] = useState<string | null>(null);
 
   const sortedMemories = useMemo(() => sortMemoriesByDate(memories), [memories]);
   const activeMemory =
@@ -190,6 +221,7 @@ export default function MemoryReader({
 
   scrapbookEntries.forEach((entry, index) => {
     timeline.push({
+      key: `entry:${entry.paragraphIndex}`,
       type: "entry",
       data: entry,
       timestamp: entry.timestamp,
@@ -204,6 +236,7 @@ export default function MemoryReader({
       displayDate.toISOString();
 
     timeline.push({
+      key: `image:${index}`,
       type: "image",
       data: {
         url,
@@ -218,6 +251,39 @@ export default function MemoryReader({
   timeline.sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
+  const storedTimelineOrder = Array.isArray(activeMemory?.timeline_order)
+    ? activeMemory.timeline_order
+    : [];
+  const orderedTimeline =
+    storedTimelineOrder.length > 0
+      ? [...timeline].sort((a, b) => {
+          const indexA = storedTimelineOrder.indexOf(a.key);
+          const indexB = storedTimelineOrder.indexOf(b.key);
+
+          if (indexA === -1 && indexB === -1) {
+            return (
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            );
+          }
+
+          if (indexA === -1) return 1;
+          if (indexB === -1) return -1;
+
+          return indexA - indexB;
+        })
+      : timeline;
+  const canDeleteActiveMemory =
+    Boolean(activeMemory && currentUserId && activeMemory.user_id === currentUserId);
+
+  const isOwnEntry = (entry: ScrapbookEntry) => {
+    if (!currentUserName) {
+      return false;
+    }
+
+    const entryAuthor = entry.author || entry.label;
+
+    return normalizeAuthor(entryAuthor) === normalizeAuthor(currentUserName);
+  };
 
   const loadMemories = useCallback(async () => {
     setLoading(true);
@@ -228,10 +294,15 @@ export default function MemoryReader({
 
     if (sessionError || !sessionData.session) {
       setError("Please sign in to view memories.");
+      setCurrentUserId(null);
+      setCurrentUserName(null);
       setMemories([]);
       setLoading(false);
       return;
     }
+
+    setCurrentUserId(sessionData.session.user.id);
+    setCurrentUserName(getDisplayNameFromSessionUser(sessionData.session.user));
 
     const { data, error: fetchError } = await supabaseBrowserClient
       .from("memories")
@@ -286,32 +357,30 @@ export default function MemoryReader({
         return;
       }
 
-      const sessionUserId = sessionData.session.user.id;
+      if (activeMemory.user_id !== sessionData.session.user.id) {
+        setError("Only the person who created this memory can delete it.");
+        return;
+      }
+
+      const { data: deletedMemory, error: deleteError } = await supabaseBrowserClient
+        .from("memories")
+        .delete()
+        .eq("id", activeMemory.id)
+        .eq("user_id", sessionData.session.user.id)
+        .select("id")
+        .single();
+
+      if (deleteError || !deletedMemory) {
+        setError(deleteError?.message || "This memory could not be deleted.");
+        return;
+      }
 
       const storagePaths = imageUrls
         .map((imageUrl) => getMemoryImageStoragePath(imageUrl))
         .filter((storagePath): storagePath is string => Boolean(storagePath));
 
       if (storagePaths.length > 0) {
-        const { error: deleteImagesError } = await supabaseBrowserClient.storage
-          .from("memories")
-          .remove(storagePaths);
-
-        if (deleteImagesError) {
-          setError(deleteImagesError.message);
-          return;
-        }
-      }
-
-      const { error: deleteError } = await supabaseBrowserClient
-        .from("memories")
-        .delete()
-        .eq("id", activeMemory.id)
-        .eq("user_id", sessionUserId);
-
-      if (deleteError) {
-        setError(deleteError.message);
-        return;
+        await supabaseBrowserClient.storage.from("memories").remove(storagePaths);
       }
 
       router.push("/memories");
@@ -385,14 +454,124 @@ export default function MemoryReader({
     setAddingParagraph(false);
   };
 
-  const handleUpdateSuccess = async () => {
-    setIsEditing(false);
+  const startEditingEntry = (entry: ScrapbookEntry) => {
+    setParagraphEditError(null);
+    setEditingParagraphIndex(entry.paragraphIndex);
+    setEditingParagraphText(entry.text);
+  };
+
+  const cancelEditingEntry = () => {
+    setParagraphEditError(null);
+    setEditingParagraphIndex(null);
+    setEditingParagraphText("");
+  };
+
+  const toggleEditingMemory = () => {
+    setIsEditingMemory((current) => {
+      if (current) {
+        cancelEditingEntry();
+      }
+
+      return !current;
+    });
+  };
+
+  const moveTimelineItem = async (itemKey: string, direction: -1 | 1) => {
+    if (!activeMemory) {
+      return;
+    }
+
+    const currentOrder = orderedTimeline.map((item) => item.key);
+    const currentIndex = currentOrder.indexOf(itemKey);
+    const nextIndex = currentIndex + direction;
+
+    if (
+      currentIndex < 0 ||
+      nextIndex < 0 ||
+      nextIndex >= currentOrder.length
+    ) {
+      return;
+    }
+
+    const nextOrder = [...currentOrder];
+    const [movedItem] = nextOrder.splice(currentIndex, 1);
+    nextOrder.splice(nextIndex, 0, movedItem);
+    setSavingOrder(true);
+
+    const { data: updatedMemory, error: updateError } = await supabaseBrowserClient
+      .from("memories")
+      .update({ timeline_order: nextOrder })
+      .eq("id", activeMemory.id)
+      .select("id")
+      .single();
+
+    if (updateError || !updatedMemory) {
+      setError(updateError?.message || "Could not rearrange this memory.");
+      setSavingOrder(false);
+      return;
+    }
+
     await loadMemories();
+    setSavingOrder(false);
+  };
+
+  const saveEditedEntry = async (entry: ScrapbookEntry) => {
+    if (!activeMemory) {
+      return;
+    }
+
+    setParagraphEditError(null);
+
+    if (!isOwnEntry(entry)) {
+      setParagraphEditError("You can only edit reflections you wrote.");
+      return;
+    }
+
+    if (!editingParagraphText.trim()) {
+      setParagraphEditError("A reflection cannot be empty.");
+      return;
+    }
+
+    setSavingParagraph(true);
+
+    const nextContent = replaceScrapbookParagraph(
+      activeMemory.content,
+      entry.paragraphIndex,
+      buildScrapbookParagraph(
+        entry.author || entry.label,
+        editingParagraphText.trim(),
+        entry.timestamp,
+      ),
+    );
+
+    const { data: updatedMemory, error: updateError } = await supabaseBrowserClient
+      .from("memories")
+      .update({ content: nextContent })
+      .eq("id", activeMemory.id)
+      .select("id")
+      .single();
+
+    if (updateError || !updatedMemory) {
+      setParagraphEditError(updateError?.message || "Could not save reflection.");
+      setSavingParagraph(false);
+      return;
+    }
+
+    cancelEditingEntry();
+    await loadMemories();
+    setSavingParagraph(false);
   };
 
   return (
-    <div className="memory-paper min-h-screen">
-      <header className="sticky top-0 z-20 border-b border-stone-200/70 bg-[#fbfaf8]/90 backdrop-blur">
+    <div
+      className={
+        surface === "embedded"
+          ? "memory-paper rounded-[1.75rem] border border-amber-200/70 bg-[#fbfaf8] shadow-xl shadow-amber-950/10"
+          : "memory-paper min-h-screen"
+      }
+    >
+      {surface === "standalone" ? (
+        <header className="sticky top-0 z-20 border-b border-stone-200/70 bg-[#fbfaf8]/90 backdrop-blur">
         <div className="mx-auto flex h-[72px] max-w-6xl items-center justify-between px-5 sm:px-8">
           <div className="flex min-w-0 items-center gap-4">
             <button
@@ -431,9 +610,16 @@ export default function MemoryReader({
             </Link>
           </div>
         </div>
-      </header>
+        </header>
+      ) : null}
 
-      <main className="mx-auto max-w-[760px] px-5 pb-24 pt-12 sm:px-8">
+      <main
+        className={
+          surface === "embedded"
+            ? "mx-auto max-w-[760px] px-5 py-10 sm:px-8 lg:py-12"
+            : "mx-auto max-w-[760px] px-5 pb-24 pt-12 sm:px-8"
+        }
+      >
         {loading ? (
           <div className="rounded-lg border border-stone-200 bg-white/75 p-8 text-center text-sm text-stone-600 shadow-sm">
             Loading memory...
@@ -502,17 +688,44 @@ export default function MemoryReader({
             </section>
 
             <section className="space-y-11">
-              {timeline.length > 0 ? (
-                timeline.map((item) => {
+              {orderedTimeline.length > 0 ? (
+                orderedTimeline.map((item, timelineIndex) => {
                   if (item.type === "entry") {
                     const entry = item.data as ScrapbookEntry;
                     const accent = getEntryAccent(entry);
+                    const isEditingThisEntry =
+                      editingParagraphIndex === entry.paragraphIndex;
+                    const canEditThisEntry = isOwnEntry(entry);
 
                     return (
                       <section
                         key={`entry-${item.index}`}
                         className="relative overflow-hidden rounded-lg bg-white/58 py-6 pl-7 pr-6 shadow-[0_18px_45px_rgba(40,32,24,0.06)] ring-1 ring-black/[0.025] sm:px-9"
                       >
+                        {isEditingMemory ? (
+                          <div className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-white/70 px-2 py-1 shadow-sm">
+                            <GripVertical className="h-4 w-4 text-stone-400" />
+                            <button
+                              type="button"
+                              onClick={() => moveTimelineItem(item.key, -1)}
+                              disabled={timelineIndex === 0 || savingOrder}
+                              className="rounded-full px-2 text-xs font-semibold text-stone-600 transition hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-30"
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveTimelineItem(item.key, 1)}
+                              disabled={
+                                timelineIndex === orderedTimeline.length - 1 ||
+                                savingOrder
+                              }
+                              className="rounded-full px-2 text-xs font-semibold text-stone-600 transition hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-30"
+                            >
+                              Down
+                            </button>
+                          </div>
+                        ) : null}
                         <span
                           className={`absolute inset-y-0 left-0 w-1 ${accent.rail}`}
                           aria-hidden="true"
@@ -528,9 +741,58 @@ export default function MemoryReader({
                               <p>{entry.label}</p>
                               <p>{formatEntryTime(entry.timestamp)}</p>
                             </div>
-                            <p className="whitespace-pre-line text-[0.96rem] leading-7 text-slate-950">
-                              {entry.text}
-                            </p>
+                            {isEditingThisEntry ? (
+                              <div className="space-y-3">
+                                <textarea
+                                  value={editingParagraphText}
+                                  onChange={(event) =>
+                                    setEditingParagraphText(event.target.value)
+                                  }
+                                  rows={5}
+                                  className="w-full resize-none rounded-lg border border-stone-200 bg-white/90 px-3 py-3 text-[0.96rem] leading-7 text-slate-950 outline-none transition focus:border-stone-500 focus:ring-2 focus:ring-stone-200"
+                                  aria-label="Edit reflection"
+                                />
+                                {paragraphEditError ? (
+                                  <p className="text-sm text-rose-600">
+                                    {paragraphEditError}
+                                  </p>
+                                ) : null}
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => saveEditedEntry(entry)}
+                                    disabled={savingParagraph}
+                                    className="inline-flex items-center gap-2 rounded-full bg-stone-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    <Check className="h-4 w-4" />
+                                    {savingParagraph ? "Saving..." : "Save"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={cancelEditingEntry}
+                                    className="inline-flex items-center gap-2 rounded-full border border-stone-300 px-4 py-2 text-sm font-medium text-stone-700 transition hover:bg-white"
+                                  >
+                                    <X className="h-4 w-4" />
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <p className="whitespace-pre-line text-[0.96rem] leading-7 text-slate-950">
+                                  {entry.text}
+                                </p>
+                                {isEditingMemory && canEditThisEntry ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditingEntry(entry)}
+                                    className="mt-4 rounded-full border border-stone-300 bg-white/45 px-4 py-2 text-sm font-medium text-stone-700 transition hover:bg-white"
+                                  >
+                                    Edit this reflection
+                                  </button>
+                                ) : null}
+                              </>
+                            )}
                           </div>
                         </div>
                       </section>
@@ -540,7 +802,31 @@ export default function MemoryReader({
                   const imageItem = item.data as TimelineImage;
 
                   return (
-                    <figure key={`image-${item.index}`}>
+                    <figure key={`image-${item.index}`} className="relative">
+                      {isEditingMemory ? (
+                        <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-full bg-white/80 px-2 py-1 shadow-sm">
+                          <GripVertical className="h-4 w-4 text-stone-400" />
+                          <button
+                            type="button"
+                            onClick={() => moveTimelineItem(item.key, -1)}
+                            disabled={timelineIndex === 0 || savingOrder}
+                            className="rounded-full px-2 text-xs font-semibold text-stone-600 transition hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            Up
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveTimelineItem(item.key, 1)}
+                            disabled={
+                              timelineIndex === orderedTimeline.length - 1 ||
+                              savingOrder
+                            }
+                            className="rounded-full px-2 text-xs font-semibold text-stone-600 transition hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            Down
+                          </button>
+                        </div>
+                      ) : null}
                       <div className="overflow-hidden rounded-lg bg-stone-900 shadow-[0_18px_45px_rgba(32,24,16,0.14)] ring-1 ring-black/10">
                         {/* Public Supabase image URLs are not configured for next/image yet. */}
                         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -618,19 +904,27 @@ export default function MemoryReader({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setIsEditing((current) => !current)}
-                  className="inline-flex items-center gap-2 rounded-full bg-stone-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-300"
+                  onClick={toggleEditingMemory}
+                  className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-stone-300 ${
+                    isEditingMemory
+                      ? "bg-stone-700 text-white hover:bg-stone-800"
+                      : "border border-stone-300 bg-white/50 text-stone-800 hover:bg-white"
+                  }`}
                 >
                   <Pencil className="h-4 w-4" />
-                  {isEditing ? "Cancel Edit" : "Edit Memory"}
+                  {isEditingMemory ? "Done Editing" : "Edit Memory"}
                 </button>
                 <button
                   type="button"
                   onClick={handleDelete}
-                  disabled={isDeleting}
+                  disabled={isDeleting || !canDeleteActiveMemory}
                   className="inline-flex items-center rounded-full border border-rose-200 bg-white/45 px-5 py-2.5 text-sm font-medium text-rose-700 transition hover:bg-rose-50 focus:outline-none focus:ring-2 focus:ring-rose-200 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isDeleting ? "Deleting..." : "Delete"}
+                  {isDeleting
+                    ? "Deleting..."
+                    : canDeleteActiveMemory
+                      ? "Delete"
+                      : "Only creator can delete"}
                 </button>
               </div>
 
@@ -650,24 +944,6 @@ export default function MemoryReader({
               </p>
             </section>
 
-            {isEditing ? (
-              <section className="mt-10 rounded-lg bg-white/70 p-5 shadow-sm ring-1 ring-black/[0.03]">
-                <h2 className="mb-4 font-serif text-2xl font-semibold text-slate-950">
-                  Edit this memory
-                </h2>
-                <MemoryEditForm
-                  memoryId={activeMemory.id}
-                  initialValues={{
-                    title: activeMemory.title,
-                    content: activeMemory.content ?? "",
-                    image_urls: imageUrls,
-                    image_captions: imageCaptions,
-                    image_timestamps: imageTimestamps,
-                  }}
-                  onSuccess={handleUpdateSuccess}
-                />
-              </section>
-            ) : null}
           </article>
         )}
       </main>

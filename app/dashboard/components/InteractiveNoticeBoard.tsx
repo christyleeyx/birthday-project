@@ -9,6 +9,8 @@ import {
   useState,
 } from "react";
 
+import { supabaseBrowserClient } from "@/app/supabase/client";
+
 type BoardItem =
   | {
       id: string;
@@ -31,7 +33,9 @@ type BoardItem =
       hasTransparency: boolean;
     };
 
-const STORAGE_KEY = "mosaic-notice-board-items";
+const BOARD_KEY = "main";
+const STORAGE_KEY = "pookles-notice-board-items";
+const LEGACY_STORAGE_KEY = "mosaic-notice-board-items";
 
 const defaultItems: BoardItem[] = [
   {
@@ -155,28 +159,129 @@ export default function InteractiveNoticeBoard() {
     startWidth: number;
     aspectRatio: number;
   } | null>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [items, setItems] = useState<BoardItem[]>(defaultItems);
+  const [hasLoadedBoard, setHasLoadedBoard] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
   useEffect(() => {
-    void Promise.resolve().then(() => {
-      const savedItems = window.localStorage.getItem(STORAGE_KEY);
-
-      if (!savedItems) {
-        return;
-      }
+    void Promise.resolve().then(async () => {
+      const savedItems =
+        window.localStorage.getItem(STORAGE_KEY) ??
+        window.localStorage.getItem(LEGACY_STORAGE_KEY);
 
       try {
-        setItems(JSON.parse(savedItems) as BoardItem[]);
+        const { data: sessionData } = await supabaseBrowserClient.auth.getSession();
+
+        if (sessionData.session) {
+          const { data, error } = await supabaseBrowserClient
+            .from("notice_boards")
+            .select("items")
+            .eq("board_key", BOARD_KEY)
+            .maybeSingle();
+
+          if (!error && Array.isArray(data?.items)) {
+            setItems(data.items as BoardItem[]);
+            setHasLoadedBoard(true);
+            setSaveStatus("saved");
+            return;
+          }
+        }
       } catch {
-        setItems(defaultItems);
+        // Local storage fallback below keeps the board usable offline.
       }
+
+      if (savedItems) {
+        try {
+          setItems(JSON.parse(savedItems) as BoardItem[]);
+        } catch {
+          setItems(defaultItems);
+        }
+      }
+
+      setHasLoadedBoard(true);
     });
   }, []);
 
   useEffect(() => {
+    if (!hasLoadedBoard) {
+      return;
+    }
+
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  }, [items]);
+    void Promise.resolve().then(() => setSaveStatus("saving"));
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    saveTimeoutRef.current = setTimeout(() => {
+      void Promise.resolve().then(async () => {
+        try {
+          const { data: sessionData } =
+            await supabaseBrowserClient.auth.getSession();
+
+          if (!sessionData.session) {
+            setSaveStatus("saved");
+            return;
+          }
+
+          const { error } = await supabaseBrowserClient
+            .from("notice_boards")
+            .upsert({
+              board_key: BOARD_KEY,
+              items,
+              updated_at: new Date().toISOString(),
+            });
+
+          setSaveStatus(error ? "error" : "saved");
+        } catch {
+          setSaveStatus("error");
+        }
+      });
+    }, 700);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [hasLoadedBoard, items]);
+
+  useEffect(() => {
+    const { data: authListener } = supabaseBrowserClient.auth.onAuthStateChange(
+      (_event, session) => {
+        if (!session) {
+          return;
+        }
+
+        void Promise.resolve().then(async () => {
+          const { data, error } = await supabaseBrowserClient
+            .from("notice_boards")
+            .select("items")
+            .eq("board_key", BOARD_KEY)
+            .maybeSingle();
+
+          if (!error && Array.isArray(data?.items)) {
+            setItems(data.items as BoardItem[]);
+          }
+        });
+      },
+    );
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const addNote = () => {
     const colors: BoardItem[] = [
@@ -383,6 +488,21 @@ export default function InteractiveNoticeBoard() {
         </label>
         <p className="flex items-center text-xs font-medium text-white/80">
           Click the board, then paste an image.
+        </p>
+        <p
+          className={`flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+            saveStatus === "error"
+              ? "bg-rose-100 text-rose-700"
+              : "bg-white/20 text-white/85"
+          }`}
+        >
+          {saveStatus === "saving"
+            ? "Saving..."
+            : saveStatus === "error"
+              ? "Save failed"
+              : hasLoadedBoard
+                ? "Saved"
+                : "Loading..."}
         </p>
       </div>
 
